@@ -24,7 +24,7 @@ ALLOWED_SENDERS = [
 #  2. GOOGLE FORM LINK
 #     Paste the full URL of your Google Form here.
 # ─────────────────────────────────────────────────────────────────
-FORM_LINK = "https://forms.gle/XXXXXXXXXXXX"
+FORM_LINK = "https://forms.gle/8f3yGyLKu8N483E38"
 
 # ─────────────────────────────────────────────────────────────────
 #  3. FORM FIELD DEFAULTS
@@ -45,11 +45,18 @@ DEFAULT_DEPARTMENT      = "Your Department Name"
 NOTIFY_PHONE = "91XXXXXXXXXX"   # e.g. "919876543210"
 
 # ─────────────────────────────────────────────────────────────────
-#  5. CHROME PROFILE PATH  (usually no need to change)
+#  5. CHROME PROFILE PATH & NAME  (usually no need to change)
 #     Selenium uses a dedicated Chrome profile to stay logged in
 #     to Google. Point this at wherever you created the profile.
+#
+#     CHROME_PROFILE_DIR  → the folder passed to --user-data-dir
+#     CHROME_PROFILE_NAME → the profile sub-folder inside that dir
+#                           (almost always "Default" unless you set
+#                           up multiple Chrome profiles — check
+#                           chrome://version to confirm yours)
 # ─────────────────────────────────────────────────────────────────
-CHROME_PROFILE_DIR = r"C:\SeleniumProfiles\GuruProfile"
+CHROME_PROFILE_DIR  = r"C:\SeleniumProfiles\GuruProfile"
+CHROME_PROFILE_NAME = "Default"  # Change to "Profile 1", "Profile 2", etc. if needed
 
 # ─────────────────────────────────────────────────────────────────
 #  6. BEHAVIOUR FLAGS

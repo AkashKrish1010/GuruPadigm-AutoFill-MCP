@@ -21,6 +21,7 @@ from config import (
     DEFAULT_DEPARTMENT,
     NOTIFY_PHONE as CFG_NOTIFY_PHONE,
     CHROME_PROFILE_DIR,
+    CHROME_PROFILE_NAME,
     AUTO_SUBMIT as CFG_AUTO_SUBMIT,
     HEADLESS as CFG_HEADLESS,
     BRIDGE_API,
@@ -409,7 +410,7 @@ def fill_form():
     print("[STEP 4] Launching Chrome with copied profile...")
     options = webdriver.ChromeOptions()
     options.add_argument(f"--user-data-dir={custom_profile_dir}")
-    options.add_argument("--profile-directory=Default")
+    options.add_argument(f"--profile-directory={CHROME_PROFILE_NAME}")
     # NOTE: --disable-extensions removed — Google treats it as suspicious
     # and kills the authenticated session. Use stealth flags instead:
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -431,20 +432,23 @@ def fill_form():
         options.add_argument("--headless=new")   # Modern headless — supports file upload
         print("[INFO] Running in HEADLESS mode (no browser window).")
     else:
-        options.add_argument("--start-maximized")
         print("[INFO] Running in VISIBLE mode (browser window will open).")
 
     print("[INFO] Starting Chrome browser...")
     browser = webdriver.Chrome(options=options)
 
-    # Force window size after launch (belt-and-suspenders for subprocess contexts)
-    try:
-        if not HEADLESS:
+    # Give Chrome a moment to settle its window handle before we interact with it.
+    # When launched via start_automation.bat → watcher → subprocess, Chrome spawns in
+    # a nested process context where the window isn't ready immediately.
+    time.sleep(1)
+
+    # Try to maximize only in visible mode — headless has no real window.
+    # Silently ignore failure; --window-size=1920,1080 already ensures correct size.
+    if not HEADLESS:
+        try:
             browser.maximize_window()
-        browser.set_window_size(1920, 1080)
-    except Exception as e:
-        print(f"[WARN] Could not resize window (non-fatal): {e}")
-        print("[INFO] Continuing anyway — window size won't affect form filling.")
+        except Exception:
+            pass  # Window size already set via --window-size option
 
     browser.get(form_link)
     wait = WebDriverWait(browser, 30)

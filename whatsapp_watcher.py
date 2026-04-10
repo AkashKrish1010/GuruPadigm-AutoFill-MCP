@@ -38,6 +38,7 @@ from config import (
     POLL_INTERVAL,
     BRIDGE_API,
     EVENT_SERVER_PORT,
+    CHROME_PROFILE_DIR,
 )
 
 # ─────────────────────────── RUNTIME CONSTANTS ───────────────────────────────
@@ -94,13 +95,13 @@ def get_new_pptx_messages(processed_ids: set) -> list:
         conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
         cursor = conn.cursor()
 
-        # Build dynamic OR conditions for all allowed senders
+        # Build sender conditions — only match the SENDER field (who sent us the file),
+        # NOT chat_jid (which would also match files WE sent TO that person).
+        # Also enforce is_from_me = 0 so only received messages trigger.
         sender_conditions = []
         params = []
         for sender_id in ALLOWED_SENDERS:
             sender_conditions.append("m.sender LIKE ?")
-            sender_conditions.append("m.chat_jid LIKE ?")
-            params.append(f"%{sender_id}%")
             params.append(f"%{sender_id}%")
 
         sender_where = " OR ".join(sender_conditions)
@@ -122,6 +123,7 @@ def get_new_pptx_messages(processed_ids: set) -> list:
             JOIN chats c ON m.chat_jid = c.jid
             WHERE
                 ({sender_where})
+                AND m.is_from_me = 0
                 AND m.media_type = 'document'
                 AND (
                     LOWER(m.filename) LIKE '%.pptx'
@@ -133,7 +135,8 @@ def get_new_pptx_messages(processed_ids: set) -> list:
         """, params)
         rows = cursor.fetchall()
         conn.close()
-        # Filter out already-processed IDs
+        # Filter out already-processed message IDs only (not filenames —
+        # same filename can legitimately arrive in a new message next week)
         return [r for r in rows if r[0] not in processed_ids]
     except sqlite3.Error as e:
         print(f"[DB ERROR] {e}")
@@ -173,14 +176,31 @@ def trigger_form_script(pptx_path: str):
 
     print(f"[TRIGGER] Launching guru_auto_form.py with PPTX: {pptx_path}")
 
-    # Close any running Chrome instances to avoid profile lock
-    print("[TRIGGER] Ensuring Chrome is closed...")
+    # ── Kill Chrome and release the Selenium profile lock ──────────────────
+    # When launched from start_automation.bat, Chrome may already be open.
+    # taskkill alone isn't enough — Chrome leaves a SingletonLock file in the
+    # profile directory that prevents re-launch. We delete it explicitly.
+    print("[TRIGGER] Ensuring Chrome is closed and profile lock is cleared...")
     subprocess.call(
         ["taskkill", "/F", "/IM", "chrome.exe"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
-    time.sleep(2)
+    time.sleep(3)  # Give OS time to release file handles
+
+    # Delete SingletonLock (and SingletonCookie) left by Chrome
+    import glob
+    for lock_pattern in [
+        os.path.join(CHROME_PROFILE_DIR, "SingletonLock"),
+        os.path.join(CHROME_PROFILE_DIR, "SingletonCookie"),
+        os.path.join(CHROME_PROFILE_DIR, "SingletonSocket"),
+    ]:
+        for lock_file in glob.glob(lock_pattern):
+            try:
+                os.remove(lock_file)
+                print(f"[TRIGGER] Removed lock file: {lock_file}")
+            except OSError:
+                pass  # Already gone — that's fine
 
     # Popen (non-blocking) — the browser will open and handle itself
     subprocess.Popen(
@@ -191,22 +211,25 @@ def trigger_form_script(pptx_path: str):
 def handle_pptx_event(msg_id: str, chat_jid: str, sender: str, filename: str):
     """
     Shared handler called by both the Flask endpoint and the poll loop.
-    Uses a lock so the exact same message_id is NEVER processed twice,
-    even if both sources fire simultaneously for the same PPTX.
-    Also deduplicates by FILENAME so re-sending the same file with a
-    new message ID does NOT trigger the form again.
+    Uses a lock so the exact same message_id is NEVER processed twice.
+
+    Dedup strategy (two keys):
+      1. message ID          - prevents race between Flask push + poll for the SAME send.
+      2. file::DATE::name    - blocks resending the same file on the SAME DAY,
+                               but allows the same filename next week
+                               (different date = different key).
     """
-    # Normalize filename as a secondary dedup key
-    filename_key = f"file::{filename.strip().lower()}"
+    today = datetime.now().strftime("%Y-%m-%d")
+    filename_day_key = f"file::{today}::{filename.strip().lower()}"
 
     # Fast pre-check without the lock
     processed = load_processed_ids()
     if msg_id in processed:
         print(f"[SKIP] Already processed (message ID): {msg_id}")
         return
-    if filename_key in processed:
-        print(f"[SKIP] Already processed (same filename): {filename}")
-        print(f"       To re-submit, remove '{filename_key}' from .processed_wa_ids.json")
+    if filename_day_key in processed:
+        print(f"[SKIP] Already submitted today (same filename): {filename}")
+        print(f"       Same filename next week will trigger normally.")
         return
 
     # Acquire lock — only ONE thread can be inside this block at a time
@@ -216,22 +239,23 @@ def handle_pptx_event(msg_id: str, chat_jid: str, sender: str, filename: str):
         if msg_id in processed:
             print(f"[SKIP] Already processed (lock - msg ID): {msg_id}")
             return
-        if filename_key in processed:
-            print(f"[SKIP] Already processed (lock - filename): {filename}")
+        if filename_day_key in processed:
+            print(f"[SKIP] Already submitted today (lock - filename): {filename}")
             return
 
         print(f"\n{'='*60}")
         print(f"[MATCH] 📎 PPTX received!")
         print(f"        From    : {sender}")
         print(f"        File    : {filename}")
+        print(f"        Date key: {filename_day_key}")
         print(f"{'='*60}")
 
-        # Mark BOTH the message ID and filename as processed IMMEDIATELY
+        # Mark BOTH keys immediately (before download starts)
         processed.add(msg_id)
-        processed.add(filename_key)
+        processed.add(filename_day_key)
         save_processed_ids(processed)
         print(f"[INFO] Marked as processed: msg={msg_id}")
-        print(f"[INFO] Marked as processed: {filename_key}")
+        print(f"[INFO] Marked as processed: {filename_day_key}")
 
     # Download and trigger OUTSIDE the lock (can take time; no need to block)
     pptx_path = download_pptx(msg_id, chat_jid)

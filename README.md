@@ -20,8 +20,9 @@ That's it. The script will:
 | Step | What happens |
 |------|-------------|
 | 🔴 | Closes any open Chrome windows (frees the Selenium profile lock) |
-| 🔨 | **Auto-builds** `whatsapp-bridge.exe` if it doesn't exist yet (first run only, ~1-2 min) |
-| 🟡 | Starts the **Go WhatsApp bridge** in a new terminal window |
+| 🟡 | Verifies Go is installed and accessible in PATH |
+| ⚙️ | Enables **CGO** (`go env -w CGO_ENABLED=1`) — requires MSYS2 on PATH |
+| 🟡 | Starts the **Go WhatsApp bridge** via `go run main.go` in a new terminal window |
 | ⏳ | Waits 10 seconds for the bridge to initialize |
 | 🟢 | Starts the **Python PPTX watcher** in a new terminal window |
 
@@ -93,8 +94,9 @@ guruauto/
 | Requirement | Version / Notes |
 |---|---|
 | **Windows 10 / 11** | Required (uses COM, `.bat` scripts, `taskkill`) |
-| **Python** | 3.10 or newer |
-| **Go** | 1.21 or newer — [download](https://go.dev/dl/) |
+| **Python** | 3.10 or newer — [download](https://www.python.org/downloads/) |
+| **Go** | 1.21 or newer — **[download installer from go.dev/dl](https://go.dev/dl/)** |
+| **MSYS2 (C compiler)** | Required for CGO (whatsapp-mcp bridge). Install from [msys2.org](https://www.msys2.org/), then add `ucrt64\bin` to your PATH. [Step-by-step guide ↗](https://www.msys2.org/docs/environments/) |
 | **Google Chrome** | Latest stable |
 | **ChromeDriver** | Must match your Chrome version — [download](https://chromedriver.chromium.org/downloads) |
 | **Microsoft Office** | PowerPoint (for PPTX → PDF). Falls back to LibreOffice if not installed. |
@@ -128,14 +130,36 @@ pip install selenium requests flask flask-cors comtypes
 
 Download and install Go 1.21+ from **[go.dev/dl](https://go.dev/dl/)**.
 
-> ✅ **That's all.** `start_automation.bat` will automatically build `whatsapp-bridge.exe` on the first run. You don't need to run any build commands manually.
+---
 
-> If you ever want to rebuild manually (e.g. after editing `main.go`):
-> ```bash
-> cd whatsapp-mcp/whatsapp-bridge
-> go mod tidy
-> go build -o whatsapp-bridge.exe .
-> ```
+### Step 3b — Install a C compiler (MSYS2) for the WhatsApp bridge
+
+The whatsapp-mcp bridge requires **CGO**, which needs a C compiler on Windows.
+
+We recommend using **MSYS2**:
+
+1. Download and install MSYS2 from **[msys2.org](https://www.msys2.org/)**.
+2. Open the **MSYS2 UCRT64** shell (search "UCRT64" in Start Menu — **not** the regular MSYS2 shell) and run:
+   ```bash
+   pacman -S mingw-w64-ucrt-x86_64-gcc
+   ```
+3. Add `C:\msys64\ucrt64\bin` to your **Windows PATH** environment variable.
+4. **Open a brand-new `cmd` or PowerShell window** (existing terminals won't see the PATH change).
+5. Verify gcc is found — run this in the new terminal:
+   ```bat
+   gcc --version
+   ```
+   You should see output like `gcc (Rev1, Built by MSYS2 project) 13.x.x`. If you get `not found`, the PATH is not set correctly — go back to step 3.
+6. Now enable CGO and run the bridge (run these **in order**, in the same new terminal):
+   ```bat
+   cd whatsapp-mcp\whatsapp-bridge
+   go env -w CGO_ENABLED=1
+   go run main.go
+   ```
+
+> ⚠️ **`go env -w CGO_ENABLED=1` alone is not enough.** Go silently falls back to `CGO_ENABLED=0` if it cannot find `gcc` in PATH, even if the env var is set.
+
+> 📖 A full step-by-step guide is available at the [MSYS2 environments docs](https://www.msys2.org/docs/environments/).
 
 ---
 
@@ -221,9 +245,10 @@ Two terminal windows will open — leave them running. Close them to stop the au
 ### Option B — Manual (two terminals)
 
 **Terminal 1 — Go bridge:**
-```bash
-cd whatsapp-mcp/whatsapp-bridge
-.\whatsapp-bridge.exe
+```bat
+cd whatsapp-mcp\whatsapp-bridge
+go env -w CGO_ENABLED=1
+go run main.go
 ```
 Scan the QR code on first run.
 
@@ -280,7 +305,8 @@ python guru_auto_form.py path/to/your_config.json
 | Problem | Fix |
 |---|---|
 | `messages.db not found` | Start the Go bridge first — the DB is created after the first WhatsApp connection. |
-| QR code doesn't appear | Make sure `whatsapp-bridge.exe` was built correctly (run `go build -o whatsapp-bridge.exe .` inside `whatsapp-mcp/whatsapp-bridge`). |
+| `Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo` | `gcc` is not in your PATH. Install MSYS2 UCRT64 GCC, add `C:\msys64\ucrt64\bin` to PATH, open a **new terminal**, verify with `gcc --version`, then run `go env -w CGO_ENABLED=1` and `go run main.go`. |
+| QR code doesn't appear | Make sure Go and gcc are installed correctly and `go run main.go` started without errors. |
 | `Chrome profile session expired` | Re-open Chrome with the Selenium profile, sign into Google, close it, retry. |
 | `PPTX → PDF conversion failed` | Ensure Microsoft Office or LibreOffice is installed. |
 | `ChromeDriver version mismatch` | Download ChromeDriver matching your installed Chrome version from [here](https://chromedriver.chromium.org/downloads). |
