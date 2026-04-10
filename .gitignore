@@ -1,0 +1,56 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+
+# ── Node / Frontend (if present) ───────────────────────
+node_modules/
+dist/
+build/
+frontend/dist/
+
+# ── IDE ─────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Logs ────────────────────────────────────────────────
+*.log
+npm-debug.log*
+
+# ── Environment / Secrets ───────────────────────────────
+.env
+.env.*
+
+# ── GuruAuto runtime files (personal data) ─────────────
+temp_config.json
+.processed_wa_ids.json
+
+# ── WhatsApp Bridge ────────────────────────────────────
+# Session store — contains your WhatsApp login, DBs, and downloaded media
+whatsapp-mcp/whatsapp-bridge/store/
+
+# Compiled Go binary (~40 MB) — users should build locally
+whatsapp-mcp/whatsapp-bridge/whatsapp-bridge.exe
+
+# ── Generated / Downloaded files ────────────────────────
+*.pdf
+*.pptx
+*.ppt
+
+# ── Chrome profiles ────────────────────────────────────
+SeleniumProfiles/
+
+# ── Debug screenshots ──────────────────────────────────
+form_debug.png
