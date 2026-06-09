@@ -26,24 +26,32 @@ if %ERRORLEVEL% EQU 0 (
 )
 echo.
 
-:: ── Step 1: Verify Go is installed ─────────────────────────────────────────
+:: ── Step 1: Verify Go is installed (only if running from source) ───────────
 echo [1/3] Checking Go installation...
 set BRIDGE_DIR=%~dp0whatsapp-mcp\whatsapp-bridge
 
-where go >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo [ERROR] Go is not installed or not in PATH.
-    echo         Install Go from https://go.dev/dl/ and re-run.
-    pause
-    exit /b 1
+if exist "%BRIDGE_DIR%\whatsapp-bridge.exe" (
+    echo [OK] Pre-compiled WhatsApp bridge binary found. Skipping Go runtime check.
+) else (
+    where go >nul 2>&1
+    if %ERRORLEVEL% NEQ 0 (
+        echo [ERROR] Go is not installed or not in PATH.
+        echo         Please run setup.ps1 first, or install Go manually.
+        pause
+        exit /b 1
+    )
+    echo [OK] Go found.
 )
-echo [OK] Go found.
 
 
 :: ── Step 2: Start Go bridge in a new terminal window ────────────────────────
-echo [2/3] Starting WhatsApp bridge (Go with CGO)...
+echo [2/3] Starting WhatsApp bridge...
 echo.
-start "WhatsApp Bridge" cmd /k "cd /d %BRIDGE_DIR% & echo Enabling CGO... & go env -w CGO_ENABLED=1 & echo Starting WhatsApp Bridge... & go run main.go"
+if exist "%BRIDGE_DIR%\whatsapp-bridge.exe" (
+    start "WhatsApp Bridge" cmd /k "cd /d %BRIDGE_DIR% & echo Starting WhatsApp Bridge from binary... & whatsapp-bridge.exe"
+) else (
+    start "WhatsApp Bridge" cmd /k "cd /d %BRIDGE_DIR% & echo Enabling CGO... & go env -w CGO_ENABLED=1 & echo Starting WhatsApp Bridge from source... & go run main.go"
+)
 
 :: Wait for the bridge to initialize before starting the watcher
 echo [INFO] Waiting 10 seconds for bridge to initialize...
