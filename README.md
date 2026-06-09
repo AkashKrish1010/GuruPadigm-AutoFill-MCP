@@ -4,7 +4,7 @@
 
 GuruPadigm-MCP-AutoFill is a Windows automation pipeline that watches for incoming **PPTX files on WhatsApp**, extracts student data, converts the file to PDF, and **auto-fills & submits a Google Form** — completely hands-free.
 
-Built with **Python · Selenium · WhatsApp MCP · Go**
+Built with **Python · Playwright · WhatsApp MCP · Go**
 
 ---
 
@@ -19,7 +19,7 @@ That's it. The script will:
 
 | Step | What happens |
 |------|-------------|
-| 🔴 | Closes any open Chrome windows (frees the Selenium profile lock) |
+| 🔴 | Closes any open Chrome windows (frees the Chrome profile lock) |
 | 🟡 | Verifies Go is installed and accessible in PATH |
 | ⚙️ | Enables **CGO** (`go env -w CGO_ENABLED=1`) — requires MSYS2 on PATH |
 | 🟡 | Starts the **Go WhatsApp bridge** via `go run main.go` in a new terminal window |
@@ -29,7 +29,7 @@ That's it. The script will:
 Once running, **send a PPTX from a whitelisted WhatsApp number** and the form fills itself.
 
 ```
-📱 WhatsApp  ──►  🌉 Go Bridge  ──►  🐍 Python Watcher  ──►  🌐 Selenium  ──►  ✅ Form Submitted
+📱 WhatsApp  ──►  🌉 Go Bridge  ──►  🐍 Python Watcher  ──►  🌐 Playwright  ──►  ✅ Form Submitted
 ```
 
 ---
@@ -51,7 +51,7 @@ whatsapp_watcher.py
   ↓ writes temp_config.json
         │
         ▼
-guru_auto_form.py  (Selenium)
+guru_auto_form.py  (Playwright)
   ↓ launches Chrome with a dedicated profile
   ↓ converts PPTX → PDF  (via MS Office COM / LibreOffice)
   ↓ fills all Google Form fields
@@ -73,7 +73,7 @@ guruauto/
 ├── 🚀 start_automation.bat        ← START HERE — launches everything
 │
 ├── ⚙️ config.py                    ← EDIT THIS — all your settings in one place
-├── guru_auto_form.py              # Core Selenium form-filler
+├── guru_auto_form.py              # Core Playwright form-filler
 ├── whatsapp_watcher.py            # WhatsApp PPTX watcher + event server
 │
 ├── whatsapp-mcp/
@@ -98,7 +98,6 @@ guruauto/
 | **Go** | 1.21 or newer — **[download installer from go.dev/dl](https://go.dev/dl/)** |
 | **MSYS2 (C compiler)** | Required for CGO (whatsapp-mcp bridge). Install from [msys2.org](https://www.msys2.org/), then add `ucrt64\bin` to your PATH. [Step-by-step guide ↗](https://www.msys2.org/docs/environments/) |
 | **Google Chrome** | Latest stable |
-| **ChromeDriver** | Must match your Chrome version — [download](https://chromedriver.chromium.org/downloads) |
 | **Microsoft Office** | PowerPoint (for PPTX → PDF). Falls back to LibreOffice if not installed. |
 | **WhatsApp** | Must be logged in on your phone (bridge uses WhatsApp Web protocol) |
 
@@ -113,16 +112,12 @@ cd GuruPadigm-MCP-AutoFill
 
 ---
 
-### Step 2 — Install Python dependencies
+### Step 2 — Install Python dependencies & Playwright
 
 ```bash
-pip install selenium requests flask flask-cors comtypes
+pip install playwright requests flask flask-cors comtypes
+playwright install chromium
 ```
-
-> **Optional** (Windows file-dialog fallback):
-> ```bash
-> pip install pywinauto
-> ```
 
 ---
 
@@ -189,35 +184,43 @@ DEFAULT_DEPARTMENT      = "Your Department Name"
 NOTIFY_PHONE = "919876543210"
 
 # 5. Chrome profile path
-CHROME_PROFILE_DIR = r"C:\SeleniumProfiles\GuruProfile"
+CHROME_PROFILE_DIR = r"C:\PlaywrightProfiles\GuruProfile"
 
 # 6. Behaviour flags
-AUTO_SUBMIT   = False    # True = submit automatically
-HEADLESS      = False    # True = run Chrome without a visible window
+AUTO_SUBMIT   = True     # True = submit automatically
+HEADLESS      = True     # True = run Chrome without a visible window
 POLL_INTERVAL = 300      # Seconds between DB polls
 ```
 
-> **💡 Two important flags to know:**
+> **💡 Important behavior flags:**
 >
 > | Flag | Default | What it does |
 > |---|---|---|
-> | `HEADLESS = True` | `False` | Chrome runs invisibly in the background. Set to `False` to **watch the browser fill the form** — great for first-time setup or debugging. |
-> | `AUTO_SUBMIT = True` | `False` | Form is submitted automatically. Set to `False` to **pause before submit** so you can review the filled form manually. |
+> | `HEADLESS = True` | `True` | Chrome runs invisibly in the background. Set to `False` to **watch the browser fill the form** — great for first-time setup or debugging. |
+> | `AUTO_SUBMIT = True` | `True` | Form is submitted automatically. Set to `False` to **pause before submit** (overriding headed mode) so you can review the filled form manually. |
 
 ---
 
-### Step 5 — Create a dedicated Selenium Chrome profile
+### Step 5 — Google Account Login Setup & Session Recovery
 
-This profile stores your Google login so the form can be accessed without re-authenticating on every run.
+The automation uses a dedicated Chrome profile directory (`C:\PlaywrightProfiles\GuruProfile`) to persist your Google Account session.
 
-1. Open a terminal and run (use the same path as `CHROME_PROFILE_DIR` in `config.py`):
-   ```
-   chrome --user-data-dir="C:\SeleniumProfiles\GuruProfile"
-   ```
-2. Sign in to the **Google account** used to submit the form.
-3. Close Chrome.
+#### Initial Setup
+The first time you double-click `start_automation.bat` (or run `python whatsapp_watcher.py`), the script will detect if the profile is missing and **automatically launch a login setup window**.
 
-> ⚠️ **Important:** Never open this profile manually again — Selenium needs exclusive access to it.
+Alternatively, you can run the login setup manually at any time:
+```bash
+python guru_auto_form.py --login
+```
+1. A real, non-automated Google Chrome window will open.
+2. Sign in to the Google Account used to submit the Google Form.
+3. Close the Chrome browser window and press **Enter** in the console.
+
+#### Automatic Runtime Recovery
+If your Google login session expires or gets logged out mid-run, the script will gracefully:
+1. Temporarily pause automation and close the automated browser.
+2. Open a real Chrome window prompting you to sign back in.
+3. Once you sign in and press Enter in the terminal, it will automatically resume the form execution and submit it.
 
 ---
 
@@ -296,7 +299,7 @@ python guru_auto_form.py path/to/your_config.json
 - **`config.py`** contains YOUR personal settings — **review it before committing.** The repo ships with placeholder values only.
 - **`temp_config.json`** and **`.processed_wa_ids.json`** are in `.gitignore` — they contain personal data and must never be committed.
 - The `ALLOWED_SENDERS` whitelist ensures only trusted contacts can trigger form submissions.
-- The Selenium Chrome profile (set via `CHROME_PROFILE_DIR` in `config.py`) stores your Google session cookies — **do not share this folder**.
+- The Playwright Chrome profile (set via `CHROME_PROFILE_DIR` in `config.py`) stores your Google session cookies — **do not share this folder**.
 
 ---
 
@@ -307,23 +310,11 @@ python guru_auto_form.py path/to/your_config.json
 | `messages.db not found` | Start the Go bridge first — the DB is created after the first WhatsApp connection. |
 | `Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo` | `gcc` is not in your PATH. Install MSYS2 UCRT64 GCC, add `C:\msys64\ucrt64\bin` to PATH, open a **new terminal**, verify with `gcc --version`, then run `go env -w CGO_ENABLED=1` and `go run main.go`. |
 | QR code doesn't appear | Make sure Go and gcc are installed correctly and `go run main.go` started without errors. |
-| `Chrome profile session expired` | Re-open Chrome with the Selenium profile, sign into Google, close it, retry. |
+| `Chrome profile session expired` | Run `python guru_auto_form.py --login` to re-login, or wait for the automatic runtime setup prompt. |
 | `PPTX → PDF conversion failed` | Ensure Microsoft Office or LibreOffice is installed. |
-| `ChromeDriver version mismatch` | Download ChromeDriver matching your installed Chrome version from [here](https://chromedriver.chromium.org/downloads). |
 | `Bridge not reachable` | Make sure the Go bridge is running at `http://localhost:8080`. |
 | Form submits to wrong department | Update `DEFAULT_DEPARTMENT` in `config.py` to exactly match the dropdown text. |
 | PPTX triggers form twice | Check `.processed_wa_ids.json` — the dedup tracker prevents this; if corrupted, delete it. |
-
----
-
-## 🗺️ Roadmap
-
-- [ ] Parse mentee name & register number directly from PPTX slide content
-- [ ] Schedule automated runs (cron-style trigger)
-- [ ] Export submission history to Excel
-- [ ] Support multiple Google Form templates
-- [ ] Cloud deployment (headless VPS)
-- [ ] Desktop app via Electron
 
 ---
 

@@ -479,7 +479,13 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		if mediaType == "document" &&
 			(strings.HasSuffix(strings.ToLower(filename), ".pptx") ||
 				strings.HasSuffix(strings.ToLower(filename), ".ppt")) {
-			go triggerPPTXWatcher(msg.Info.ID, chatJID, sender, filename, logger)
+			// Only trigger the python watcher if the message was sent recently (last 1 hour).
+			// This prevents processing old catch-up messages synced on startup.
+			if time.Since(msg.Info.Timestamp) > 1*time.Hour {
+				logger.Infof("[PPTX trigger] Skipping historical message: %s (sent %v)", filename, msg.Info.Timestamp)
+			} else {
+				go triggerPPTXWatcher(msg.Info.ID, chatJID, sender, filename, logger)
+			}
 		}
 	}
 }
@@ -1042,7 +1048,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 
 // Handle history sync events
 func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, historySync *events.HistorySync, logger waLog.Logger) {
-	fmt.Printf("Received history sync event with %d conversations\n", len(historySync.Data.Conversations))
+	logger.Debugf("Received history sync event with %d conversations", len(historySync.Data.Conversations))
 
 	syncedCount := 0
 	for _, conversation := range historySync.Data.Conversations {
@@ -1108,7 +1114,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				}
 
 				// Log the message content for debugging
-				logger.Infof("Message content: %v, Media Type: %v", content, mediaType)
+				logger.Debugf("Message content: %v, Media Type: %v", content, mediaType)
 
 				// Skip messages with no content and no media
 				if content == "" && mediaType == "" {
@@ -1166,12 +1172,12 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					logger.Warnf("Failed to store history message: %v", err)
 				} else {
 					syncedCount++
-					// Log successful message storage
+					// Log successful message storage to debug level
 					if mediaType != "" {
-						logger.Infof("Stored message: [%s] %s -> %s: [%s: %s] %s",
+						logger.Debugf("Stored message: [%s] %s -> %s: [%s: %s] %s",
 							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, mediaType, filename, content)
 					} else {
-						logger.Infof("Stored message: [%s] %s -> %s: %s",
+						logger.Debugf("Stored message: [%s] %s -> %s: %s",
 							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, content)
 					}
 				}
@@ -1179,7 +1185,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 		}
 	}
 
-	fmt.Printf("History sync complete. Stored %d messages.\n", syncedCount)
+	logger.Debugf("History sync complete. Stored %d messages.", syncedCount)
 }
 
 // Request history sync from the server

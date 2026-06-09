@@ -5,12 +5,20 @@ import time
 import sys
 import json
 import requests
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.action_chains import ActionChains
 from datetime import datetime
+from playwright.sync_api import sync_playwright
+
+# Force UTF-8 encoding for stdout/stderr to support emojis on Windows consoles
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 # ── Load central user configuration (edit config.py, not this file) ──────────
 from config import (
@@ -32,7 +40,7 @@ custom_profile_dir = CHROME_PROFILE_DIR
 # ─── Load configuration from file (passed by whatsapp_watcher.py) ────────────
 PPTX_PATH = None   # Will be set below if config has it
 
-if len(sys.argv) > 1:
+if len(sys.argv) > 1 and sys.argv[1] != "--login":
     config_file = sys.argv[1]
     with open(config_file, 'r') as f:
         config = json.load(f)
@@ -64,6 +72,12 @@ else:
         "register_number": DEFAULT_REGISTER_NUMBER,
         "mentor_name":     DEFAULT_MENTOR_NAME,
     }
+    config = {}
+
+# Enforce that headless mode only runs if auto_submit is also enabled
+if HEADLESS and not AUTO_SUBMIT:
+    print("[WARNING] HEADLESS is set to True but AUTO_SUBMIT is False. Overriding HEADLESS to False to allow manual review/submission.")
+    HEADLESS = False
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -80,24 +94,99 @@ def send_whatsapp_notification(phone: str, message: str):
             timeout=10
         )
         if resp.status_code == 200 and resp.json().get("success"):
-            print(f"[NOTIFY] ✅ WhatsApp notification sent to {phone}")
+            print(f"[NOTIFY] [OK] WhatsApp notification sent to {phone}")
         else:
-            print(f"[NOTIFY] ⚠️  Bridge responded: {resp.text}")
+            print(f"[NOTIFY] [WARNING] Bridge responded: {resp.text}")
     except requests.RequestException as e:
-        print(f"[NOTIFY] ⚠️  Could not reach WhatsApp bridge: {e}")
+        print(f"[NOTIFY] [WARNING] Could not reach WhatsApp bridge: {e}")
         print("[NOTIFY]    Is the Go bridge running? (go run main.go inside whatsapp-bridge/)")
+
+
+def mark_processed(msg_id: str | None, filename_day_key: str | None):
+    """
+    Add the message ID and filename day key to the processed registry.
+    This prevents the watcher from triggering the same file/message again.
+    """
+    if not msg_id and not filename_day_key:
+        return
+    processed_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".processed_wa_ids.json")
+    processed_ids = set()
+    if os.path.exists(processed_file):
+        try:
+            with open(processed_file, "r") as f:
+                processed_ids = set(json.load(f))
+        except Exception as e:
+            print(f"[WARNING] Could not read processed IDs file: {e}")
+    
+    if msg_id:
+        processed_ids.add(msg_id)
+    if filename_day_key:
+        processed_ids.add(filename_day_key)
+        
+    try:
+        with open(processed_file, "w") as f:
+            json.dump(list(processed_ids), f)
+        print(f"[INFO] Marked as processed in .processed_wa_ids.json: msg_id={msg_id}, key={filename_day_key}")
+    except Exception as e:
+        print(f"[ERROR] Could not write to processed IDs file: {e}")
+
+
+def launch_chrome_for_login():
+    """
+    Launches a real, non-automated Google Chrome instance using the configured
+    profile directory. This allows the user to sign in to Google normally
+    without being blocked by Google's automation/bot detection.
+    """
+    print("[LOGIN SETUP] Launching real Google Chrome for authentication...")
+    paths = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ]
+    chrome_path = None
+    for p in paths:
+        if os.path.exists(p):
+            chrome_path = p
+            break
+            
+    if not chrome_path:
+        chrome_path = shutil.which("chrome")
+        
+    if not chrome_path:
+        print("[ERROR] Could not find chrome.exe in standard paths or PATH.")
+        print(f"Please run it manually: chrome.exe --user-data-dir=\"{custom_profile_dir}\"")
+        return
+
+    print(f"[INFO] Using Chrome at: {chrome_path}")
+    print(f"[INFO] Opening profile directory: {custom_profile_dir}")
+    
+    # Launch Chrome as a real, non-automated process
+    proc = subprocess.Popen([chrome_path, f"--user-data-dir={custom_profile_dir}"])
+    
+    print("\n" + "=" * 60)
+    print("  GOOGLE SIGN-IN HELPER")
+    print("=" * 60)
+    print("  1. A real Google Chrome window has been opened.")
+    print("  2. Sign in to your Google Account (for the form submission).")
+    print("  3. Once signed in, close the Chrome browser window.")
+    print("=" * 60)
+    input("\nPress Enter here once you have finished signing in and closed Chrome...")
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    print("[LOGIN SETUP] Setup complete! You can now run the automation normally.")
 
 
 def copy_chrome_profile():
     r"""
     One-time setup: ensures a dedicated Chrome profile directory exists
-    for Selenium to use with persistent Google login.
+    for browser automation to use with persistent Google login.
 
     IMPORTANT - create a DEDICATED profile:
-      1. Run:  chrome --user-data-dir="<your CHROME_PROFILE_DIR from config.py>"
+      1. Run:  python guru_auto_form.py --login
       2. Log in to the Google account used for the form
       3. Close Chrome
-      4. Never open that profile in regular Chrome (only via Selenium)
+      4. Never open that profile in regular Chrome (only via automation)
     This avoids the "logged out" problem caused by session conflicts.
     """
     print("[STEP 1] Checking Chrome profile...")
@@ -107,9 +196,8 @@ def copy_chrome_profile():
     print(f"[INFO] Creating Chrome profile directory: {custom_profile_dir}")
     os.makedirs(custom_profile_dir, exist_ok=True)
     print(f"[DONE] Profile directory created.")
-    print(f"       Please sign in manually by running:")
-    print(f'       chrome --user-data-dir="{custom_profile_dir}"')
-    print(f"       Then log in to Google and close Chrome.\n")
+    print("[INFO] Automatically launching login helper...")
+    launch_chrome_for_login()
 
 
 def convert_pptx_to_pdf(pptx_path: str) -> str:
@@ -118,7 +206,6 @@ def convert_pptx_to_pdf(pptx_path: str) -> str:
     Falls back to LibreOffice if PowerPoint is not installed.
     Returns the absolute path to the generated PDF.
     """
-    import os
     pptx_path = os.path.abspath(pptx_path)
     pdf_path  = os.path.splitext(pptx_path)[0] + ".pdf"
 
@@ -132,7 +219,7 @@ def convert_pptx_to_pdf(pptx_path: str) -> str:
         presentation.SaveAs(pdf_path, 32)   # 32 = ppSaveAsPDF
         presentation.Close()
         powerpoint.Quit()
-        print(f"[CONVERT] ✅ PDF saved: {pdf_path}")
+        print(f"[CONVERT] [OK] PDF saved: {pdf_path}")
         return pdf_path
     except Exception as e:
         print(f"[CONVERT] PowerPoint COM failed: {e}. Trying LibreOffice...")
@@ -146,7 +233,7 @@ def convert_pptx_to_pdf(pptx_path: str) -> str:
             capture_output=True, text=True, timeout=60
         )
         if result.returncode == 0 and os.path.isfile(pdf_path):
-            print(f"[CONVERT] ✅ PDF saved via LibreOffice: {pdf_path}")
+            print(f"[CONVERT] [OK] PDF saved via LibreOffice: {pdf_path}")
             return pdf_path
         else:
             raise RuntimeError(result.stderr)
@@ -157,7 +244,7 @@ def convert_pptx_to_pdf(pptx_path: str) -> str:
         )
 
 
-def upload_pptx(browser, wait, pptx_path):
+def upload_pptx(page, pptx_path):
     """
     Upload a file to the Google Form file-upload field.
     Automatically converts PPTX to PDF before uploading.
@@ -165,10 +252,9 @@ def upload_pptx(browser, wait, pptx_path):
     Strategy:
       1. Scroll to the file-upload section so it fully renders
       2. Click the form's "Add file" button → opens the Google Drive picker
-      3. The picker lives inside an IFRAME — switch into it
-      4. Find the hidden <input type="file"> near the "Browse" button
-      5. send_keys the file path, switch back to main content
-      6. Wait for Google to finish uploading to Drive
+      3. Locate the picker iframe (lives inside an iframe)
+      4. Set input files on the <input type="file"> inside the iframe
+      5. Wait for Google to finish uploading to Drive
     """
     print("[STEP 8] Preparing file for upload...")
 
@@ -186,204 +272,113 @@ def upload_pptx(browser, wait, pptx_path):
     print(f"[INFO] File to upload: {abs_path}")
 
     # ── Scroll to the file-upload section so it fully renders ───────────────
-    browser.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-    time.sleep(1.5)  # Let the widget render
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+    page.wait_for_timeout(1500)
 
     # ── STEP 8b: Click the form's upload button to open the Drive picker ──
-    UPLOAD_BUTTON_XPATH = '//*[@id="mG61Hd"]/div[2]/div/div[2]/div[6]/div/div/div[2]/div/div[3]/span/span[2]'
     print("[STEP 8b] Clicking file upload button to open Drive picker...")
-    try:
-        upload_btn = wait.until(EC.element_to_be_clickable((By.XPATH, UPLOAD_BUTTON_XPATH)))
-        browser.execute_script("arguments[0].scrollIntoView(true);", upload_btn)
-        time.sleep(0.5)
-        upload_btn.click()
-        print("[INFO] Upload button clicked — Drive picker should open.")
-    except Exception as e:
-        print(f"[WARN] Could not click upload button via primary XPath: {e}")
-        # Fallback: try text-based button search
+    upload_btn = None
+    for selector in [
+        'xpath=//*[@id="mG61Hd"]/div[2]/div/div[2]/div[6]/div/div/div[2]/div/div[3]/span/span[2]',
+        'xpath=//span[contains(text(), "Add file") or contains(text(), "Choose file") or contains(text(), "Upload")]'
+    ]:
         try:
-            fallback_btn = browser.find_element(By.XPATH,
-                '//span[contains(text(), "Add file") or contains(text(), "Choose file") or contains(text(), "Upload")]')
-            browser.execute_script("arguments[0].scrollIntoView(true);", fallback_btn)
-            fallback_btn.click()
-            print("[INFO] Upload button clicked via fallback text XPath.")
-        except Exception as e2:
-            raise RuntimeError(f"[ERROR] Could not click any upload button: {e2}")
+            btn = page.wait_for_selector(selector, timeout=5000)
+            if btn:
+                btn.scroll_into_view_if_needed()
+                page.wait_for_timeout(500)
+                btn.click()
+                upload_btn = btn
+                print("[INFO] Upload button clicked — Drive picker should open.")
+                break
+        except Exception as e:
+            print(f"[DEBUG] Selector {selector} failed: {e}")
+
+    if not upload_btn:
+        raise RuntimeError("[ERROR] Could not click any upload button")
 
     # Wait for the Google Drive picker dialog to appear
-    time.sleep(3)
+    page.wait_for_timeout(3000)
 
     # ── STEP 8c: Switch into the Google Drive picker iframe ──────────────
     print("[STEP 8c] Looking for Google Drive picker iframe...")
+    picker_frame = None
+    
+    # Check current frames for the Google Drive picker
+    for frame in page.frames:
+        if 'docs.google.com/picker' in frame.url:
+            picker_frame = frame
+            print(f"[INFO] Found Drive picker frame: {frame.url[:80]}...")
+            break
+            
+    # Retry if it is still loading
+    if not picker_frame:
+        page.wait_for_timeout(2000)
+        for frame in page.frames:
+            if 'docs.google.com/picker' in frame.url:
+                picker_frame = frame
+                print(f"[INFO] Found Drive picker frame after retry: {frame.url[:80]}...")
+                break
+
     file_input = None
-    picker_iframe_switched = False
-
-    # The picker is rendered inside an iframe. Find and switch into it.
-    iframes = browser.find_elements(By.TAG_NAME, "iframe")
-    print(f"[DEBUG] Found {len(iframes)} iframe(s) on the page")
-
-    for idx, iframe in enumerate(iframes):
+    if picker_frame:
         try:
-            src = iframe.get_attribute("src") or ""
-            iframe_id = iframe.get_attribute("id") or ""
-            print(f"[DEBUG] iframe[{idx}]: id='{iframe_id}', src='{src[:80]}...'")
-
-            # Google Drive picker iframes typically have 'docs.google.com/picker' in src
-            browser.switch_to.frame(iframe)
-            picker_iframe_switched = True
-            print(f"[INFO] Switched into iframe[{idx}]")
-
-            # Try to find input[type="file"] inside this iframe
-            try:
-                file_input = browser.find_element(By.CSS_SELECTOR, 'input[type="file"]')
-                if file_input:
-                    print(f"[INFO] ✅ Found file input inside iframe[{idx}]")
-                    break
-            except:
-                pass
-
-            # Also try the uploadButtonId — Browse button's sibling/child input
-            try:
-                file_input = browser.execute_script("""
-                    // Look near the Browse/upload button for a file input
-                    var uploadBtn = document.getElementById('uploadButtonId');
-                    if (uploadBtn) {
-                        var parent = uploadBtn.parentElement;
-                        while (parent) {
-                            var inp = parent.querySelector('input[type="file"]');
-                            if (inp) return inp;
-                            parent = parent.parentElement;
-                        }
-                    }
-                    // Fallback: any input[type="file"] anywhere in this frame
-                    return document.querySelector('input[type="file"]');
-                """)
-                if file_input:
-                    print(f"[INFO] ✅ Found file input near uploadButtonId in iframe[{idx}]")
-                    break
-            except:
-                pass
-
-            # Didn't find it here, switch back and try next iframe
-            browser.switch_to.default_content()
-            picker_iframe_switched = False
-
-        except Exception as e:
-            print(f"[DEBUG] Could not process iframe[{idx}]: {e}")
-            try:
-                browser.switch_to.default_content()
-            except:
-                pass
-            picker_iframe_switched = False
-
-    # ── If no iframe worked, try nested iframes (picker inside picker) ──
-    if not file_input:
-        print("[INFO] Trying nested iframes...")
-        browser.switch_to.default_content()
-        for idx, iframe in enumerate(iframes):
-            try:
-                browser.switch_to.frame(iframe)
-                nested_iframes = browser.find_elements(By.TAG_NAME, "iframe")
-                for nidx, nested in enumerate(nested_iframes):
-                    try:
-                        browser.switch_to.frame(nested)
-                        file_input = browser.find_element(By.CSS_SELECTOR, 'input[type="file"]')
-                        if file_input:
-                            print(f"[INFO] ✅ Found file input in nested iframe[{idx}][{nidx}]")
-                            picker_iframe_switched = True
-                            break
-                    except:
-                        browser.switch_to.parent_frame()
-                if file_input:
-                    break
-                browser.switch_to.default_content()
-            except:
-                try:
-                    browser.switch_to.default_content()
-                except:
-                    pass
-
-    # ── Last resort: check main document (in case picker is not in iframe) ──
-    if not file_input:
-        browser.switch_to.default_content()
-        picker_iframe_switched = False
-        try:
-            file_input = browser.find_element(By.CSS_SELECTOR, 'input[type="file"]')
+            file_input = picker_frame.wait_for_selector('input[type="file"]', state="attached", timeout=10000)
             if file_input:
-                print("[INFO] Found file input in main document (no iframe needed)")
-        except:
+                print("[INFO] [OK] Found file input inside the picker iframe")
+        except Exception as e:
+            print(f"[WARN] Failed to locate file input in iframe: {e}")
+
+    # Fallback to main page if frame not detected
+    if not file_input:
+        try:
+            file_input = page.wait_for_selector('input[type="file"]', state="attached", timeout=5000)
+            if file_input:
+                print("[INFO] Found file input in main page context")
+        except Exception:
             pass
 
     if not file_input:
-        # Switch back to main content before raising
-        try:
-            browser.switch_to.default_content()
-        except:
-            pass
         raise RuntimeError(
-            "[ERROR] Could not find the file upload input in any iframe or the main document. "
-            "Google may have changed the picker structure."
+            "[ERROR] Could not find the file upload input in any iframe or the main document."
         )
 
-    # ── STEP 8d: Make the hidden input interactable and send the file path ──
+    # ── STEP 8d: Make target input file path selection ──
     print("[STEP 8d] Sending file path to input element...")
-    browser.execute_script(
-        "arguments[0].style.display    = 'block';"
-        "arguments[0].style.visibility = 'visible';"
-        "arguments[0].style.opacity    = '1';"
-        "arguments[0].style.width      = '200px';"
-        "arguments[0].style.height     = '20px';",
-        file_input
-    )
-    time.sleep(0.5)
-    file_input.send_keys(abs_path)
-    print(f"[INFO] ✅ File path sent to input: {abs_path}")
-
-    # Switch back to the main content
-    browser.switch_to.default_content()
-    print("[INFO] Switched back to main document.")
+    try:
+        if picker_frame:
+            picker_frame.locator('input[type="file"]').set_input_files(abs_path)
+        else:
+            page.locator('input[type="file"]').set_input_files(abs_path)
+        print(f"[INFO] [OK] File path sent to input: {abs_path}")
+    except Exception as e:
+        print(f"[WARN] Direct file set failed: {e}. Attempting styling override...")
+        override_js = """
+            var el = document.querySelector('input[type="file"]');
+            if (el) {
+                el.style.display    = 'block';
+                el.style.visibility = 'visible';
+                el.style.opacity    = '1';
+                el.style.width      = '200px';
+                el.style.height     = '20px';
+            }
+        """
+        if picker_frame:
+            picker_frame.evaluate(override_js)
+            page.wait_for_timeout(500)
+            picker_frame.locator('input[type="file"]').set_input_files(abs_path)
+        else:
+            page.evaluate(override_js)
+            page.wait_for_timeout(500)
+            page.locator('input[type="file"]').set_input_files(abs_path)
+        print(f"[INFO] [OK] File path sent to input after style override: {abs_path}")
 
     # Wait for Google to finish uploading the file to Drive
     print("[INFO] Waiting for file upload to complete...")
-    _wait_for_upload_complete(browser, wait)
+    _wait_for_upload_complete(page)
 
 
-def _upload_via_button_click(browser, wait, abs_path):
-    """
-    Click the 'Add file' button in Google Forms, then use keyboard to
-    type the file path into the Windows file picker dialog.
-    Requires pywinauto: pip install pywinauto
-    """
-    try:
-        import pywinauto
-        from pywinauto.keyboard import send_keys as pw_send_keys
-    except ImportError:
-        raise RuntimeError(
-            "pywinauto is not installed. Run: pip install pywinauto\n"
-            "This is needed to control the Windows file picker dialog."
-        )
-
-    # Click the 'Choose files from your device' / 'Add file' button
-    upload_button = wait.until(EC.element_to_be_clickable(
-        (By.XPATH,
-         '//span[contains(text(),"Add file") or contains(text(),"Choose files")'
-         ' or contains(text(),"Browse")]'
-         '/ancestor::div[@role="button"]')
-    ))
-    upload_button.click()
-    print("[INFO] Clicked upload button. Waiting for file dialog...")
-    time.sleep(2)  # Let the OS file picker open
-
-    # Type the path into the Windows Open File dialog
-    pw_send_keys(abs_path, with_spaces=True)
-    time.sleep(0.5)
-    pw_send_keys("{ENTER}")
-    time.sleep(1)
-
-    print("[INFO] File path entered into OS dialog.")
-
-
-def _wait_for_upload_complete(browser, wait, timeout=120):
+def _wait_for_upload_complete(page, timeout=120):
     """
     Poll until the Google Forms upload spinner is gone and
     the uploaded filename appears, confirming the upload finished.
@@ -392,233 +387,261 @@ def _wait_for_upload_complete(browser, wait, timeout=120):
     while time.time() < deadline:
         try:
             # A successfully uploaded file shows a 'remove' or 'delete' button
-            remove_btn = browser.find_elements(
-                By.XPATH,
-                '//*[@aria-label="Remove file" or @aria-label="Delete file"'
-                ' or contains(@class,"freebirdFormviewerViewItemsFileRemoveFile")]'
+            remove_btn = page.locator(
+                'xpath=//*[@aria-label="Remove file" or @aria-label="Delete file" or contains(@class,"freebirdFormviewerViewItemsFileRemoveFile")]'
             )
-            if remove_btn:
-                print("[INFO] ✅ File upload confirmed (remove button appeared).")
+            if remove_btn.count() > 0:
+                print("[INFO] [OK] File upload confirmed (remove button appeared).")
                 return
         except Exception:
             pass
-        time.sleep(2)
+        page.wait_for_timeout(2000)
     print("[WARN] Upload confirmation timed out — the file may still have uploaded. Proceeding.")
 
 
 def fill_form():
-    print("[STEP 4] Launching Chrome with copied profile...")
-    options = webdriver.ChromeOptions()
-    options.add_argument(f"--user-data-dir={custom_profile_dir}")
-    options.add_argument(f"--profile-directory={CHROME_PROFILE_NAME}")
-    # NOTE: --disable-extensions removed — Google treats it as suspicious
-    # and kills the authenticated session. Use stealth flags instead:
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-infobars")
-    options.add_argument("--ignore-certificate-errors")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
-    # Suppress the "Chrome is being controlled by automated software" bar
-    options.add_argument("--disable-notifications")
+    print("[STEP 4] Launching Chrome with copied profile via Playwright...")
+    
+    launch_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--disable-notifications",
+        "--ignore-certificate-errors",
+        "--window-size=1920,1080",
+        f"--profile-directory={CHROME_PROFILE_NAME}"
+    ]
 
-    # Always set window size — when launched via subprocess (watcher),
-    # Chrome can get an undefined/tiny window, breaking form rendering.
-    options.add_argument("--window-size=1920,1080")
-
-    if HEADLESS:
-        options.add_argument("--headless=new")   # Modern headless — supports file upload
-        print("[INFO] Running in HEADLESS mode (no browser window).")
-    else:
-        print("[INFO] Running in VISIBLE mode (browser window will open).")
-
-    print("[INFO] Starting Chrome browser...")
-    browser = webdriver.Chrome(options=options)
-
-    # Give Chrome a moment to settle its window handle before we interact with it.
-    # When launched via start_automation.bat → watcher → subprocess, Chrome spawns in
-    # a nested process context where the window isn't ready immediately.
-    time.sleep(1)
-
-    # Try to maximize only in visible mode — headless has no real window.
-    # Silently ignore failure; --window-size=1920,1080 already ensures correct size.
-    if not HEADLESS:
+    with sync_playwright() as p:
         try:
-            browser.maximize_window()
-        except Exception:
-            pass  # Window size already set via --window-size option
-
-    browser.get(form_link)
-    wait = WebDriverWait(browser, 30)
-
-    try:
-        # ── LOGIN GUARD: detect if Google logged us out ───────────────────────
-        # If the session expired, Google redirects to accounts.google.com.
-        # We catch that early and alert via WhatsApp instead of silently failing.
-        print("[STEP 4b] Checking login state...")
-        time.sleep(3)  # Let page fully render + redirect happen if needed
-        browser.execute_script("window.scrollTo(0, 0);")  # Start at top
-        current_url = browser.current_url
-        if "accounts.google.com" in current_url or "signin" in current_url.lower():
-            alert_msg = (
-                "⚠️ *GuruAuto Login Alert*\n"
-                "Chrome profile session expired — Google is asking for sign-in.\n"
-                "Please re-authenticate the Selenium profile:\n"
-                "1. Open Chrome with: chrome --user-data-dir=C:\\SeleniumProfiles\\GuruProfile\n"
-                "2. Sign in to Google\n"
-                "3. Close Chrome\n"
-                "Form was NOT submitted."
+            print("[INFO] Starting Chrome browser context...")
+            # Try launching using system Chrome channel to locate profiles correctly
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=custom_profile_dir,
+                headless=HEADLESS,
+                channel="chrome",
+                args=launch_args,
+                no_viewport=True
             )
-            print(f"[ERROR] {alert_msg}")
-            if NOTIFY_PHONE:
-                send_whatsapp_notification(NOTIFY_PHONE, alert_msg)
-            return   # Exit gracefully — don't crash
-        print("[INFO] Login state OK — Google account is active.")
-
-        # ── STEP 5: Email checkbox (optional — only shown on first visit) ────
-        print("[STEP 5] Checking for email consent checkbox...")
-        try:
-            short_wait = WebDriverWait(browser, 5)
-            email_checkbox = short_wait.until(
-                EC.element_to_be_clickable((By.XPATH, '//div[@role="checkbox"]'))
+        except Exception as e:
+            print(f"[WARN] Launching with local Chrome channel failed: {e}")
+            print("[INFO] Retrying launch using default Playwright Chromium browser...")
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=custom_profile_dir,
+                headless=HEADLESS,
+                args=launch_args,
+                no_viewport=True
             )
-            email_checkbox.click()
-            print("[INFO] Email checkbox clicked.")
-        except Exception:
-            print("[INFO] No email checkbox found (already consented or not required). Continuing.")
 
-        # ── STEP 5b: Click 'Next' if form split into multiple pages ──────────
-        # Google Forms inserts a page break when a file-upload field is added.
+        page = context.pages[0] if context.pages else context.new_page()
+        page.goto(form_link)
+        
+        # Give Chrome a moment to settle page load
+        page.wait_for_timeout(3000)
+
         try:
-            short_wait = WebDriverWait(browser, 5)
-            next_btn = short_wait.until(EC.element_to_be_clickable(
-                (By.XPATH,
-                 '//span[text()="Next"]/ancestor::div[@role="button"]'
-                 ' | //div[@role="button"]//span[text()="Next"]')
-            ))
-            next_btn.click()
-            print("[INFO] 'Next' button clicked — moving to form page 2.")
-            time.sleep(2)  # Wait for next page to render
-        except Exception:
-            print("[INFO] No 'Next' button — form is single-page, continuing.")
+            # ── LOGIN GUARD: detect if Google logged us out ───────────────────────
+            print("[STEP 4b] Checking login state...")
+            page.evaluate("window.scrollTo(0, 0);")
+            current_url = page.url
+            if "accounts.google.com" in current_url or "signin" in current_url.lower():
+                print("[WARNING] Chrome profile session expired or not logged in.")
+                print("[INFO] Closing automated browser to free profile directory lock...")
+                try:
+                    context.close()
+                except Exception:
+                    pass
+                
+                # Automatically run the login helper inline
+                launch_chrome_for_login()
+                
+                # Re-launch the persistent context
+                print("[INFO] Re-opening automated Chrome browser context...")
+                try:
+                    context = p.chromium.launch_persistent_context(
+                        user_data_dir=custom_profile_dir,
+                        headless=HEADLESS,
+                        channel="chrome",
+                        args=launch_args,
+                        no_viewport=True
+                    )
+                except Exception as e:
+                    print(f"[WARN] Launching with local Chrome channel failed: {e}")
+                    print("[INFO] Retrying launch using default Playwright Chromium browser...")
+                    context = p.chromium.launch_persistent_context(
+                        user_data_dir=custom_profile_dir,
+                        headless=HEADLESS,
+                        args=launch_args,
+                        no_viewport=True
+                    )
+                
+                page = context.pages[0] if context.pages else context.new_page()
+                page.goto(form_link)
+                page.wait_for_timeout(3000)
+                
+                # Recheck login state
+                page.evaluate("window.scrollTo(0, 0);")
+                current_url = page.url
+                if "accounts.google.com" in current_url or "signin" in current_url.lower():
+                    alert_msg = (
+                        "[WARNING] *GuruAuto Login Alert*\n"
+                        "Re-authentication failed — Google is still asking for sign-in.\n"
+                        "Form was NOT submitted."
+                    )
+                    print(f"[ERROR] {alert_msg}")
+                    if NOTIFY_PHONE:
+                        send_whatsapp_notification(NOTIFY_PHONE, alert_msg)
+                    sys.exit(1)
+                print("[INFO] Re-authentication successful!")
 
-        # ── STEP 6: Fill text fields ──────────────────────────────────────────
-        # Re-fetch each element immediately before use to avoid stale refs.
-        # Google Forms re-renders parts of the DOM after consent loads.
-        print("[STEP 6] Filling text input fields...")
+            print("[INFO] Login state OK — Google account is active.")
 
-        # Wait until at least 3 text inputs are present
-        wait.until(lambda d: len(d.find_elements(By.XPATH, '//input[@type="text"]')) >= 3)
+            # ── STEP 5: Email checkbox (optional — only shown on first visit) ────
+            print("[STEP 5] Checking for email consent checkbox...")
+            try:
+                email_checkbox = page.wait_for_selector('//div[@role="checkbox"]', timeout=5000)
+                if email_checkbox:
+                    email_checkbox.click()
+                    print("[INFO] Email checkbox clicked.")
+            except Exception:
+                print("[INFO] No email checkbox found (already consented or not required). Continuing.")
 
-        # Date — use JS to set value (locale-independent, stale-safe)
-        date_el = browser.find_element(By.XPATH, '//input[@type="date"]')
-        iso_date = datetime.now().strftime("%Y-%m-%d")
-        browser.execute_script("arguments[0].value = arguments[1];", date_el, iso_date)
-        # Trigger change event so Google Forms registers the value
-        browser.execute_script(
-            "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
-            "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));",
-            date_el
-        )
-        print(f"[INFO] Date filled: {iso_date}")
-
-        # Mentee name — re-fetch fresh
-        browser.find_elements(By.XPATH, '//input[@type="text"]')[0].send_keys(person_data["mentee_name"])
-        print(f"[INFO] Mentee name filled: {person_data['mentee_name']}")
-
-        # Register number — re-fetch fresh
-        browser.find_elements(By.XPATH, '//input[@type="text"]')[1].send_keys(person_data["register_number"])
-        print(f"[INFO] Register number filled: {person_data['register_number']}")
-
-        # Mentor name — re-fetch fresh
-        browser.find_elements(By.XPATH, '//input[@type="text"]')[2].send_keys(person_data["mentor_name"])
-        print(f"[INFO] Mentor name filled: {person_data['mentor_name']}")
-
-        # ── STEP 7: Department dropdown ───────────────────────────────────────
-        print("[STEP 7] Selecting department...")
-        dropdown = wait.until(EC.element_to_be_clickable((By.XPATH, '//div[@role="listbox"]')))
-        dropdown.click()
-        time.sleep(1)
-
-        # Re-fetch options fresh after dropdown opens
-        dropdown_options = wait.until(EC.presence_of_all_elements_located(
-            (By.XPATH, '//div[@role="option"]')))
-
-        option_found = False
-        for option in dropdown_options:
-            if option.text.strip() == DEPARTMENT_NAME:
-                option.click()
-                option_found = True
-                print(f"[INFO] Selected department: {DEPARTMENT_NAME}")
-                break
-
-        if not option_found:
-            raise Exception(f"Department '{DEPARTMENT_NAME}' not found in dropdown options")
-
-        # ── STEP 8: Upload PPTX (if provided) ────────────────────────────────
-        if PPTX_PATH:
-            upload_pptx(browser, wait, PPTX_PATH)
-        else:
-            print("[SKIP] No PPTX path provided. Skipping file upload step.")
-
-        # ── STEP 9: Submit ────────────────────────────────────────────────────
-        if AUTO_SUBMIT:
-            print("[STEP 9] Auto-submitting form...")
-            time.sleep(1)  # Small buffer after upload
-
-            # Google Forms submit button text can be "Submit" or "Next"
-            submit_button = wait.until(EC.element_to_be_clickable(
-                (By.XPATH,
-                 '//div[@role="button"]/span[text()="Submit"]'
-                 ' | //span[text()="Submit"]/ancestor::div[@role="button"]')
-            ))
-            browser.execute_script("arguments[0].scrollIntoView(true);", submit_button)
-            time.sleep(0.5)
-            submit_button.click()
-            print("[INFO] Submit button clicked.")
-
-            # Wait for the confirmation page
-            wait.until(EC.presence_of_element_located(
-                (By.XPATH,
-                 '//*[contains(text(),"Your response has been recorded")'
-                 ' or contains(text(),"response has been recorded")'
-                 ' or contains(text(),"Thanks")]')
-            ))
-            print("[SUCCESS] ✅ Form submitted successfully!")
-            time.sleep(2)
-
-            # ── Notify via WhatsApp ───────────────────────────────────────────
-            if NOTIFY_PHONE:
-                notify_msg = (
-                    f"✅ *Gurupadigam Form Submitted!*\n"
-                    f"👤 Mentee : {person_data['mentee_name']}\n"
-                    f"🔢 Reg No : {person_data['register_number']}\n"
-                    f"👨‍🏫 Mentor : {person_data['mentor_name']}\n"
-                    f"🏫 Dept   : {DEPARTMENT_NAME}\n"
-                    f"📅 Date   : {person_data['date']}"
+            # ── STEP 5b: Click 'Next' if form split into multiple pages ──────────
+            try:
+                next_btn = page.wait_for_selector(
+                    'xpath=//span[text()="Next"]/ancestor::div[@role="button"] | //div[@role="button"]//span[text()="Next"]',
+                    timeout=5000
                 )
-                send_whatsapp_notification(NOTIFY_PHONE, notify_msg)
+                if next_btn:
+                    next_btn.click()
+                    print("[INFO] 'Next' button clicked — moving to form page 2.")
+                    page.wait_for_timeout(2000)
+            except Exception:
+                print("[INFO] No 'Next' button — form is single-page, continuing.")
 
-        else:
-            # Manual mode — prompt user to review before submitting
-            print("\n[INFO] All fields filled. Please review and click 'Submit' manually.")
-            input("Press Enter to close the browser...")
+            # ── STEP 6: Fill text fields ──────────────────────────────────────────
+            print("[STEP 6] Filling text input fields...")
+            page.wait_for_function("document.querySelectorAll('input[type=\"text\"]').length >= 3", timeout=30000)
 
-    except Exception as e:
-        print(f"[ERROR] Something went wrong: {str(e)}")
-        print("[DEBUG] URL:", browser.current_url)
-        print("[DEBUG] Page Source (partial):", browser.page_source[:500])
-        if AUTO_SUBMIT:
-            time.sleep(10)   # Give time to read the error before closing
-        else:
-            input("Press Enter to close the browser after error...")
-    finally:
-        browser.quit()
-        print("[INFO] Browser closed.")
+            # Date — fill using direct JS injection for locale independence
+            iso_date = datetime.now().strftime("%Y-%m-%d")
+            page.evaluate(f"""
+                var el = document.querySelector('input[type="date"]');
+                if (el) {{
+                    el.value = "{iso_date}";
+                    el.dispatchEvent(new Event('input', {{bubbles:true}}));
+                    el.dispatchEvent(new Event('change', {{bubbles:true}}));
+                }}
+            """)
+            print(f"[INFO] Date filled: {iso_date}")
+
+            # Fill text inputs by nth index
+            text_inputs = page.locator('//input[@type="text"]')
+            text_inputs.nth(0).fill(person_data["mentee_name"])
+            print(f"[INFO] Mentee name filled: {person_data['mentee_name']}")
+
+            text_inputs.nth(1).fill(person_data["register_number"])
+            print(f"[INFO] Register number filled: {person_data['register_number']}")
+
+            text_inputs.nth(2).fill(person_data["mentor_name"])
+            print(f"[INFO] Mentor name filled: {person_data['mentor_name']}")
+
+            # ── STEP 7: Department dropdown ───────────────────────────────────────
+            print("[STEP 7] Selecting department...")
+            dropdown = page.wait_for_selector('//div[@role="listbox"]', timeout=30000)
+            dropdown.click()
+            page.wait_for_timeout(1000)
+
+            # Retrieve option list items
+            page.wait_for_selector('//div[@role="option"]', timeout=10000)
+            options = page.locator('//div[@role="option"]')
+            count = options.count()
+            option_found = False
+            for i in range(count):
+                opt = options.nth(i)
+                txt = opt.inner_text().strip()
+                if txt == DEPARTMENT_NAME:
+                    opt.click()
+                    option_found = True
+                    print(f"[INFO] Selected department: {DEPARTMENT_NAME}")
+                    break
+
+            if not option_found:
+                raise Exception(f"Department '{DEPARTMENT_NAME}' not found in dropdown options")
+
+            # ── STEP 8: Upload PPTX (if provided) ────────────────────────────────
+            if PPTX_PATH:
+                upload_pptx(page, PPTX_PATH)
+            else:
+                print("[SKIP] No PPTX path provided. Skipping file upload step.")
+
+            # ── STEP 9: Submit ────────────────────────────────────────────────────
+            if AUTO_SUBMIT:
+                print("[STEP 9] Auto-submitting form...")
+                page.wait_for_timeout(1000)
+
+                submit_btn = page.wait_for_selector(
+                    'xpath=//div[@role="button"]/span[text()="Submit"] | //span[text()="Submit"]/ancestor::div[@role="button"]',
+                    timeout=15000
+                )
+                submit_btn.scroll_into_view_if_needed()
+                page.wait_for_timeout(500)
+                submit_btn.click()
+                print("[INFO] Submit button clicked.")
+
+                # Wait for confirmation page
+                page.wait_for_selector(
+                    'xpath=//*[contains(text(),"Your response has been recorded") or contains(text(),"response has been recorded") or contains(text(),"Thanks")]',
+                    timeout=30000
+                )
+                print("[SUCCESS] Form submitted successfully!")
+                page.wait_for_timeout(2000)
+
+                # Send WhatsApp confirmation
+                if NOTIFY_PHONE:
+                    notify_msg = (
+                        f"[SUCCESS] *Gurupadigam Form Submitted!*\n"
+                        f"Mentee : {person_data['mentee_name']}\n"
+                        f"Reg No : {person_data['register_number']}\n"
+                        f"Mentor : {person_data['mentor_name']}\n"
+                        f"Dept   : {DEPARTMENT_NAME}\n"
+                        f"Date   : {person_data['date']}"
+                    )
+                    send_whatsapp_notification(NOTIFY_PHONE, notify_msg)
+
+                # Mark as processed in the database/JSON
+                mark_processed(config.get('msg_id'), config.get('filename_day_key'))
+            else:
+                # Manual review mode
+                print("\n[INFO] All fields filled. Please review and click 'Submit' manually.")
+                input("Press Enter to close the browser...")
+
+                # Mark as processed in the database/JSON
+                mark_processed(config.get('msg_id'), config.get('filename_day_key'))
+
+        except Exception as e:
+            print(f"[ERROR] Something went wrong: {str(e)}")
+            print("[DEBUG] URL:", page.url)
+            try:
+                print("[DEBUG] Page Source (partial):", page.content()[:500])
+            except Exception:
+                pass
+            if AUTO_SUBMIT:
+                time.sleep(10)   # Read error message
+            else:
+                input("Press Enter to close the browser after error...")
+            sys.exit(1)
+        finally:
+            try:
+                context.close()
+            except Exception:
+                pass
+            print("[INFO] Browser closed.")
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--login":
+        launch_chrome_for_login()
+        sys.exit(0)
+
     copy_chrome_profile()
     fill_form()
