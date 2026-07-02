@@ -8,6 +8,14 @@ Built with **Python · Playwright · WhatsApp MCP · Go**
 
 ---
 
+## 🎬 Workflow Demo
+
+![GuruPadigm AutoFill in action](screenn-recod-ezgif.com-video-to-gif-converter.gif)
+
+> **Note:** In this demo recording, `AUTO_SUBMIT` was set to **`False`** and `HEADLESS` was set to **`False`** — so the browser window is fully visible and the form is **not actually submitted**. In production use, set both to `True` for fully hands-free, background operation.
+
+---
+
 ## ⚡ Quick Start (Recommended)
 
 > **This is the only command most users need.**
