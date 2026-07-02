@@ -467,10 +467,18 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 
 		// Log based on message type
-		if mediaType != "" {
-			fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, sender, mediaType, filename, content)
-		} else if content != "" {
-			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
+		if time.Since(msg.Info.Timestamp) <= 1*time.Hour {
+			if mediaType != "" {
+				fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, sender, mediaType, filename, content)
+			} else if content != "" {
+				fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
+			}
+		} else {
+			if mediaType != "" {
+				logger.Debugf("[%s] %s %s: [%s: %s] %s", timestamp, direction, sender, mediaType, filename, content)
+			} else if content != "" {
+				logger.Debugf("[%s] %s %s: %s", timestamp, direction, sender, content)
+			}
 		}
 
 		// ── EVENT-DRIVEN PPTX TRIGGER ────────────────────────────────────────
@@ -828,12 +836,12 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 }
 
 func main() {
-	// Set up logger
-	logger := waLog.Stdout("Client", "INFO", true)
+	// Set up application logger
+	logger := waLog.Stdout("App", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
 
-	// Create database connection for storing session data
-	dbLog := waLog.Stdout("Database", "INFO", true)
+	// Create database connection for storing session data (set to ERROR level)
+	dbLog := waLog.Stdout("Database", "ERROR", true)
 
 	// Create directory for database if it doesn't exist
 	if err := os.MkdirAll("store", 0755); err != nil {
@@ -860,8 +868,11 @@ func main() {
 		}
 	}
 
-	// Create client instance
-	client := whatsmeow.NewClient(deviceStore, logger)
+	// Create client logger with ERROR level to silence internal warnings (e.g. Set status notifications)
+	clientLog := waLog.Stdout("Client", "ERROR", true)
+
+	// Create client instance using clientLog
+	client := whatsmeow.NewClient(deviceStore, clientLog)
 	if client == nil {
 		logger.Errorf("Failed to create WhatsApp client")
 		return
